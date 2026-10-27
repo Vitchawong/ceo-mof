@@ -1,0 +1,5 @@
+mitdb/
+mitdb.zip
+cache/
+__pycache__/
+*.npy
