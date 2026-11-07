@@ -66,8 +66,9 @@ Ordering held in every comparison: **R1 ≥ R2 > R4 > R3.**
 - Scoring: 50 ms matching tolerance; Se, PPV, DER (thesis Eq. 66 = (FP+FN)/(TP+FN)),
   and F1. DER_TP = (FP+FN)/TP is also reported for comparison with older numbers.
 - Exclusions applied only at aggregation: thesis {104,107,118,207,217} → 43 records
-  (primary); AAMI {102,104,107,217} → 44 records (secondary; same ordering).
-- Runtime: ~40–70 min per experiment on 12 workers. Everything is cached per record.
+  (primary); AAMI {102,104,107,217} → 44 records (secondary; same pattern, but R1 and R2 are tied at 0.6/0.3: F1 89.90 vs 89.91).
+- Runtime: ~40–110 min per experiment (the moments sub-ladder took ~112 min on 6 workers).
+  Everything is cached per record.
 
 ---
 
@@ -89,11 +90,11 @@ R1 = amplitude; R2 = + differences (1–3); R3 = + moments (4–7); R4 = all 8.
 | R4 | 89.25 | 90.28 |
 
 Wilcoxon vs R1 (per-record F1): R2 ties at the fixed setting (p = 0.32) but is worse when
-tuned (p = 0.0004); R3 and R4 are worse in both views (p ≤ 0.002). R3 lost on 37/43 records.
+tuned (p = 0.0004); R3 and R4 are worse in both views (p ≈ 0.002 or smaller). R3 lost on 37/43 records.
 **Tuning R1 gains more (+3.7 F1) than any feature does.**
 
 ### Differencing sub-ladder (46.5 min)
-Equivalence check passed (max diff 0 vs cached R1 and R2).
+Equivalence check passed on the 6 quick records (max diff 0 vs cached R1 and R2).
 
 | Rung | F1 at 0.6/0.3 | F1 at own best |
 |---|---|---|
@@ -111,7 +112,7 @@ Equivalence check passed (max diff 0 vs cached R1 and R2).
   A+vel+acc 94.5 vs R1 86.7).
 
 ### Moments sub-ladder (context 100 ms)
-Equivalence check passed (max diff 0).
+Equivalence check passed on the 6 quick records (max diff 0 vs cached R1 and R3).
 
 | Rung | F1 at 0.6/0.3 | F1 at own best |
 |---|---|---|
@@ -176,10 +177,14 @@ Local folder `ohm_codes/` (on the user's laptop; the assistant cannot run these)
 - `mow_ecg_clean.py` — original MOW-ECG. **Never modify.**
 - `ceo_ladder.py` — the ladder runner (written by Claude Code). Key parts:
   `ceo_features`, `local_moments`, `scale_window`, `mof_from_dist`, `rung_scores`,
-  `_Replay` / `replayed` (stand-in for pymof), `run_record`, `summarise`, `subdiff_report`.
+  `_Replay` / `replayed` (stand-in for pymof), `run_record`, `summarise`, `subdiff_report`, `submom_report`.
   Flags: `--verify`, `--records quick|all`, `--ladder main|subdiff|submom`,
-  `--deriv savgol|gradient`, `--ctx-ms`, `--scale robust|minmax`, `--workers`.
-- `compare_representations.py`, `sensitivity_by_setting.py` — earlier work.
+  `--deriv savgol|gradient`, `--ctx-ms`, `--scale robust|minmax`, `--workers`,
+  `--quick-variants`, `--check-subdiff`, `--check-submom`.
+- `compare_representations.py`, `compare_representations2.py`, `experiment2.py`,
+  `sensitivity_by_setting.py` — earlier work (compare_representations2 tests 1D–8D inputs to
+  MOF; experiment2 prints its results from the cache).
+- `ceo_mof_ladder.py` — earlier version of the ladder runner; superseded by `ceo_ladder.py`.
 - `mitdb/` — the data. `results_ladder/` — all outputs (gitignored).
 
 **How the work is split:** experiments run in **Claude Code** on the laptop (it has the
