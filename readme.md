@@ -7,7 +7,7 @@ assistant needs to continue the work without re-deriving it.
 
 ## 1. Who / what
 
-PhD work (Vitchawong Laohabutr, Chulalongkorn University; advisors Asst. Prof. Arthorn
+Master Thesis work (Vitchawong Laohabutr, Chulalongkorn University; advisors Asst. Prof. Arthorn
 Luangsodsai and Assoc. Prof. Krung Sinapiromsaran). Topic: **R-peak detection in ECG
 using outlier detection**, not machine learning.
 
