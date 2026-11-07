@@ -3,3 +3,5 @@ mitdb.zip
 cache/
 __pycache__/
 *.npy
+
+results_ladder/

@@ -11,6 +11,15 @@ Compares these inputs to MOF (everything else in MOW-ECG is unchanged):
     8D   6D + recent acceleration and its spread                (labmate)
 1D -> 3D -> 4D -> 5D adds one ECG feature at a time; 2D, 6D and 8D follow the labmate's method.
 
+Labmate ladder (her features only, added one at a time in her order):
+    1D   x
+    2D   i, x
+    L3D  i, x, mu(x)
+    L4D  i, x, mu(x), sigma(x)
+    L5D  i, x, mu(x), sigma(x), mu(dx)
+    6D   i, x, mu(x), sigma(x), mu(dx), sigma(dx)
+Run it with:  --reps "1D,2D,L3D,L4D,L5D,6D" --name _lab
+
 For every record and every representation, all 80 IRP/MRI settings are run and scored
 against the labels. No Track B (no warm-up, no Q).
 
@@ -25,6 +34,16 @@ Options:
     --records 100,200,203      which records (default: all 48)
     --workers 2                records processed in parallel (default: number of CPUs)
     --history-ms 50            history length for the context features
+    --height-weight 2          Idea 1: multiply the scaled height column by this weight
+                               (default 1 = all columns count equally)
+    --name _lab                saves the results of this run under its own name
+                               (summary_lab.csv, per_record_lab.csv, ...) so earlier
+                               results are not overwritten
+    --centred                  Idea 2: context features use a window centred on each point
+                               (25 ms before and 25 ms after) instead of the 50 ms before it
+Results of a variant are labelled with its settings, e.g. 3D_w2_c, and saved next to the
+original results without overwriting them (summary_w2_c.csv, ...). 1D is unaffected by both
+options, so its cached scores are reused.
     --cache cache              folder for cached scores and results (point it at Google
                                Drive to keep it between Colab sessions)
 
@@ -56,6 +75,7 @@ ALL_RECORDS = ["100", "101", "102", "103", "104", "105", "106", "107", "108", "1
                "201", "202", "203", "205", "207", "208", "209", "210", "212", "213", "214", "215",
                "217", "219", "220", "221", "222", "223", "228", "230", "231", "232", "233", "234"]
 HARD = ["122", "200", "203", "228", "233"]
+PACED = ["102", "104", "107", "217"]   # left out of evaluations by the ANSI/AAMI EC57 standard
 BEATS = set("NLRBAaJSVrFejnE/fQ?")
 IRPS = np.round(np.arange(0.25, 0.701, 0.05), 2)   # 10 values, as in thesis 5.1.1
 MRIS = np.round(np.arange(0.20, 0.551, 0.05), 2)   # 8 values
@@ -84,30 +104,58 @@ def scale01(c):
     return (c - c.min()) / rng if rng > 0 else np.zeros_like(c)
 
 
-def past(c, stat, h):
-    """Mean or standard deviation over the previous h samples (not including the current one)."""
-    s = pd.Series(c).shift(1).rolling(h, min_periods=1)
+def past(c, stat, h, centred=False):
+    """Mean or standard deviation over the history of each sample.
+    Default: the previous h samples (not including the current one).
+    centred=True: h samples centred on the current one (h/2 before, h/2 after)."""
+    if centred:
+        s = pd.Series(c).rolling(h + 1, center=True, min_periods=1)
+    else:
+        s = pd.Series(c).shift(1).rolling(h, min_periods=1)
     out = getattr(s, stat)().to_numpy()
     return np.nan_to_num(out, nan=c[0] if stat == "mean" else 0.0)
 
 
-def features(win, rep, h):
-    """Turn one window of the filtered signal into the input table for MOF."""
+def features(win, rep, h, height_weight=1.0, centred=False):
+    """Turn one window of the filtered signal into the input table for MOF.
+    height_weight multiplies the scaled height column (Idea 1);
+    centred makes the history features look both ways (Idea 2)."""
     if rep == "1D":
         return win.reshape(-1, 1)
+    P = lambda c, stat: past(c, stat, h, centred)
     i = np.arange(len(win))
     dx = np.diff(win, prepend=win[0])          # first difference: speed
     d2 = np.diff(dx, prepend=dx[0])            # second difference: acceleration
-    six = [i, win, past(win, "mean", h), past(win, "std", h), past(dx, "mean", h), past(dx, "std", h)]
+    six = [i, win, P(win, "mean"), P(win, "std"), P(dx, "mean"), P(dx, "std")]
     cols = {
         "2D": [i, win],
-        "3D": [win, win - past(win, "mean", h), np.abs(dx)],
-        "4D": [win, win - past(win, "mean", h), np.abs(dx), past(dx, "std", h)],
-        "5D": [win, win - past(win, "mean", h), np.abs(dx), past(dx, "std", h), np.abs(d2)],
+        "3D": [win, win - P(win, "mean"), np.abs(dx)],
+        "4D": [win, win - P(win, "mean"), np.abs(dx), P(dx, "std")],
+        "5D": [win, win - P(win, "mean"), np.abs(dx), P(dx, "std"), np.abs(d2)],
         "6D": six,
-        "8D": six + [past(d2, "mean", h), past(d2, "std", h)],
+        "8D": six + [P(d2, "mean"), P(d2, "std")],
+        "L3D": six[:3],     # labmate ladder: i, x, mu(x)
+        "L4D": six[:4],     # + sigma(x)
+        "L5D": six[:5],     # + mu(dx)
     }[rep]
-    return np.column_stack([scale01(c) for c in cols])
+    height_col = 1 if rep in ("2D", "6D", "8D", "L3D", "L4D", "L5D") else 0
+    X = np.column_stack([scale01(c) for c in cols])
+    X[:, height_col] *= height_weight
+    return X
+
+
+def variant_tag(height_weight, centred):
+    """Suffix that identifies a variant, e.g. '_w2_c'. Empty for the original settings."""
+    tag = ""
+    if height_weight != 1:
+        tag += f"_w{height_weight:g}"
+    if centred:
+        tag += "_c"
+    return tag
+
+
+def label(rep, tag):
+    return rep if rep == "1D" else rep + tag
 
 
 def mof_scores(X):
@@ -164,23 +212,24 @@ def score(det, ref, fs):
 
 def compute_scores(job):
     """Slow part: MOF for every window of one record and representation. Cached."""
-    data_dir, rec, rep, cache, h_ms = job
-    f = os.path.join(cache, f"scores_{rec}_{rep}.npy")
+    data_dir, rec, rep, cache, h_ms, hw, centred = job
+    f = os.path.join(cache, f"scores_{rec}_{label(rep, variant_tag(hw, centred))}.npy")
     if os.path.exists(f):
         return rec, rep, None
     sig, _, fs = load(data_dir, rec)
     filt = mc.preprocess(sig, fs)
     h = int(h_ms / 1000 * fs)
     t = time.time()
-    sc = [mof_scores(features(filt[lo:hi], rep, h)) for lo, hi in make_windows(len(filt), fs)]
+    sc = [mof_scores(features(filt[lo:hi], rep, h, hw, centred)) for lo, hi in make_windows(len(filt), fs)]
     np.save(f, np.array(sc, dtype=object), allow_pickle=True)
     return rec, rep, round(time.time() - t)
 
 
 def evaluate_record(job):
     """Fast part: all 80 settings for every representation of one record. Cached."""
-    data_dir, rec, reps, cache = job
-    out = os.path.join(cache, f"result_{rec}.json")
+    data_dir, rec, reps, cache, tag, out_tag = job
+    reps = [label(r, tag) for r in reps]
+    out = os.path.join(cache, f"result_{rec}{out_tag}.json")
     if os.path.exists(out):
         rows = json.load(open(out))
         if {r["rep"] for r in rows} >= set(reps):
@@ -210,7 +259,7 @@ def evaluate_record(job):
 
 # -------------------------------------------------------------------------- summary
 
-def summarise(df, path):
+def summarise(df, path, tag=""):
     L = []
     p = L.append
     summary_rows, test_rows = [], []
@@ -218,7 +267,10 @@ def summarise(df, path):
     pct = lambda x: f"{100 * x:6.2f}%"
     reps = list(df.rep.unique())
 
-    for title, sub in [("ALL RECORDS", df), ("HARD RECORDS: " + ", ".join(HARD), df[df.record.isin(HARD)])]:
+    groups = [("ALL RECORDS", "all", df),
+              ("NON-PACED RECORDS (without " + ", ".join(PACED) + ")", "non_paced", df[~df.record.isin(PACED)]),
+              ("HARD RECORDS: " + ", ".join(HARD), "hard", df[df.record.isin(HARD)])]
+    for title, gname, sub in groups:
         if sub.empty:
             continue
         p("=" * 86)
@@ -239,7 +291,7 @@ def summarise(df, path):
                   f"{x[name + '_DER'].mean():8.3f} {x[name + '_Comp'].mean():10.3f}")
         for rep in reps:
             x = sub[sub.rep == rep]
-            r = dict(group="hard" if title.startswith("HARD") else "all", records=sub.record.nunique(), rep=rep,
+            r = dict(group=gname, records=sub.record.nunique(), rep=rep,
                      best_Se=x.best_Se.mean(), best_PPV=x.best_PPV.mean(), best_DER=x.best_DER.mean(),
                      best_Comp=x.best_Comp.mean())
             for name in FIXED:
@@ -276,8 +328,8 @@ def summarise(df, path):
     text = "\n".join(L)
     open(path, "w").write(text)
     print(text)
-    pd.DataFrame(summary_rows).to_csv(os.path.join(folder, "summary.csv"), index=False)
-    pd.DataFrame(test_rows).to_csv(os.path.join(folder, "wilcoxon_tests.csv"), index=False)
+    pd.DataFrame(summary_rows).to_csv(os.path.join(folder, f"summary{tag}.csv"), index=False)
+    pd.DataFrame(test_rows).to_csv(os.path.join(folder, f"wilcoxon_tests{tag}.csv"), index=False)
 
 
 # ----------------------------------------------------------------------------- main
@@ -290,12 +342,20 @@ if __name__ == "__main__":
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--history-ms", type=float, default=50.0)
     ap.add_argument("--cache", default="cache")
+    ap.add_argument("--height-weight", type=float, default=1.0)
+    ap.add_argument("--centred", action="store_true")
+    ap.add_argument("--name", default="", help="extra name for this run's output files, e.g. _lab")
     args = ap.parse_args()
+    tag = variant_tag(args.height_weight, args.centred)
+    out_tag = tag + args.name
 
     os.makedirs(args.cache, exist_ok=True)
     records, reps = args.records.split(","), args.reps.split(",")
 
-    jobs = [(args.data_dir, r, rep, args.cache, args.history_ms) for r in records for rep in reps]
+    jobs = [(args.data_dir, r, rep, args.cache, args.history_ms, args.height_weight, args.centred)
+            for r in records for rep in reps]
+    if tag:
+        print(f"Variant {tag}: height weight {args.height_weight:g}, centred history {args.centred}", flush=True)
     print(f"Step 1/2: MOF scores ({len(jobs)} record x representation jobs, {args.workers} workers)", flush=True)
     with Pool(args.workers) as pool:
         for i, (rec, rep, secs) in enumerate(pool.imap_unordered(compute_scores, jobs), 1):
@@ -304,18 +364,19 @@ if __name__ == "__main__":
     print("Step 2/2: 80 settings per record and representation", flush=True)
     rows = []
     with Pool(args.workers) as pool:
-        for i, res in enumerate(pool.imap_unordered(evaluate_record, [(args.data_dir, r, reps, args.cache)
+        for i, res in enumerate(pool.imap_unordered(evaluate_record, [(args.data_dir, r, reps, args.cache, tag, out_tag)
                                                                       for r in records]), 1):
             rows += res
             print(f"  [{i}/{len(records)}] {res[0]['record']} done", flush=True)
 
     df = pd.DataFrame(rows)
     df["record"] = pd.Categorical(df.record, categories=records, ordered=True)
-    df["rep"] = pd.Categorical(df.rep, categories=reps, ordered=True)
+    df["rep"] = pd.Categorical(df.rep, categories=[label(r, tag) for r in reps], ordered=True)
     df = df.sort_values(["rep", "record"])
     df["record"] = df.record.astype(str); df["rep"] = df.rep.astype(str)
-    df.to_csv(os.path.join(args.cache, "per_record.csv"), index=False)
-    summarise(df, os.path.join(args.cache, "summary.txt"))
+    df.to_csv(os.path.join(args.cache, f"per_record{out_tag}.csv"), index=False)
+    summarise(df, os.path.join(args.cache, f"summary{out_tag}.txt"), out_tag)
     print("\nResults saved in", os.path.abspath(args.cache))
-    for f in ["per_record.csv", "summary.csv", "wilcoxon_tests.csv", "summary.txt"]:
-        print("  ", f)
+    for f in ["per_record", "summary", "wilcoxon_tests"]:
+        print(f"   {f}{out_tag}.csv")
+    print(f"   summary{out_tag}.txt")
